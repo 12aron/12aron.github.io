@@ -1,49 +1,93 @@
 name: Deploy HoloTree to GitHub Pages
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
   pages: write
   id-token: write
-
 concurrency:
   group: pages
   cancel-in-progress: true
-
+env:
+  NODE_OPTIONS: --max-old-space-size=4096
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Fetch application source
         run: git clone --depth 1 https://github.com/a-123969/3D--2025.git app
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-
+          node-version: 22
+      - name: Pin verified dependency versions
+        working-directory: app
+        run: |
+          cat > package.json <<'EOF'
+          {
+            "name": "holotree-experience",
+            "private": true,
+            "version": "0.0.0",
+            "type": "module",
+            "scripts": {
+              "dev": "vite",
+              "build": "vite build",
+              "preview": "vite preview"
+            },
+            "dependencies": {
+              "react": "19.3.1",
+              "react-dom": "19.3.1",
+              "three": "0.181.2",
+              "@react-three/fiber": "9.8.2",
+              "@react-three/drei": "10.7.9",
+              "@react-three/postprocessing": "3.2.2",
+              "lucide-react": "0.556.0",
+              "react-webcam": "7.2.0"
+            },
+            "devDependencies": {
+              "@types/node": "22.20.5",
+              "@vitejs/plugin-react": "5.2.0",
+              "typescript": "5.8.3",
+              "vite": "6.4.6"
+            }
+          }
+          EOF
       - name: Install dependencies
         working-directory: app
-        run: npm install --no-audit --no-fund --legacy-peer-deps
-
+        run: npm install --include=dev --no-audit --no-fund --legacy-peer-deps
       - name: Build static site
+        id: build
         working-directory: app
-        run: npx vite build --base=./
-
+        run: |
+          set +e
+          npx vite build --base=./ > build.log 2>&1
+          RC=$?
+          echo "### vite build exit code: $RC" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -40 build.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RC" -ne 0 ]; then
+            grep -i -m 3 'error' build.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          cat build.log
+          exit $RC
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:
           enablement: true
-
+      - name: Force Pages to build from Actions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/pages" -f build_type=workflow || true
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: app/dist
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
