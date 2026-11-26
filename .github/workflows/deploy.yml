@@ -1,17 +1,22 @@
 name: Deploy HoloTree to GitHub Pages
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
 concurrency:
   group: pages
   cancel-in-progress: true
+
 env:
   NODE_OPTIONS: --max-old-space-size=4096
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,10 +24,12 @@ jobs:
     steps:
       - name: Fetch application source
         run: git clone --depth 1 https://github.com/a-123969/3D--2025.git app
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
       - name: Pin verified dependency versions
         working-directory: app
         run: |
@@ -55,23 +62,13 @@ jobs:
             }
           }
           EOF
+
       - name: Install dependencies
         working-directory: app
         run: |
           npm install --include=dev --no-audit --no-fund \
             || (echo "::warning::plain install failed, retrying with --legacy-peer-deps" && npm install --include=dev --no-audit --no-fund --legacy-peer-deps)
-      - name: Diagnostics
-        working-directory: app
-        run: |
-          {
-            echo "### env"
-            echo '```'
-            node -v
-            npm -v
-            ls -1 node_modules/.bin | grep -E '^(vite|tsc)$' || echo "no vite binary!"
-            npm ls vite --depth=0 2>&1 | head -5
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build static site
         id: build
         working-directory: app
@@ -90,18 +87,186 @@ jobs:
           fi
           tail -40 build.log
           exit $RC
+
+      - name: Add credit + password gate
+        run: |
+          cat > /tmp/add-gate.mjs <<'EOF'
+          // scripts/add-gate.mjs - 给构建产物加一层「原创署名 + 访问密码」入口页
+          //
+          // 用法: node scripts/add-gate.mjs <dist 目录>
+          //
+          // 做的事:
+          //   1. 把 dist/index.html 改名成 dist/app.html（真正的应用）
+          //   2. 往 app.html 的 </head> 前注入一段守卫脚本：没有本会话标记就弹回入口页
+          //   3. 生成新的 dist/index.html 作为入口页：展示署名、要求输入密码
+
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const dir = process.argv[2] || "dist";
+          const indexPath = path.join(dir, "index.html");
+          const appPath = path.join(dir, "app.html");
+
+          if (!fs.existsSync(indexPath)) {
+            console.error(`[add-gate] 找不到 ${indexPath}，请先执行构建`);
+            process.exit(1);
+          }
+
+          const appHtml = fs.readFileSync(indexPath, "utf8");
+
+          // 幂等保护：重复执行时不要把已经生成的应用页再覆盖一次
+          if (appHtml.includes('id="gate"') && fs.existsSync(appPath)) {
+            console.log("[add-gate] 入口页已存在，跳过（幂等）");
+            process.exit(0);
+          }
+
+          // 守卫：直接访问 app.html 但本会话没通过验证时，弹回入口页
+          const guard =
+            '<script>(function(){try{if(sessionStorage.getItem("holotree-ok")!=="1"){location.replace("./");}}catch(e){}})();</script>';
+
+          if (!appHtml.includes("</head>")) {
+            console.error("[add-gate] app.html 缺少 </head>，无法注入守卫");
+            process.exit(1);
+          }
+
+          fs.writeFileSync(appPath, appHtml.replace("</head>", guard + "\n</head>"), "utf8");
+
+          const gate = `<!DOCTYPE html>
+          <html lang="zh-CN">
+          <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+          <meta name="robots" content="noindex, nofollow">
+          <title>HoloTree · 访问验证</title>
+          <style>
+            html,body{margin:0;height:100%;background:#050505;color:#e8f7ff;
+              font-family:"Rajdhani","Segoe UI",system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+              overflow:hidden}
+            body{display:flex;align-items:center;justify-content:center}
+            .bg{position:fixed;inset:0;
+              background:
+                radial-gradient(1100px 560px at 50% 12%, rgba(0,243,255,.10), transparent 62%),
+                radial-gradient(900px 520px at 50% 108%, rgba(255,0,170,.08), transparent 62%),
+                #050505}
+            .grid{position:fixed;inset:0;
+              background-image:
+                linear-gradient(rgba(0,243,255,.055) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,243,255,.055) 1px, transparent 1px);
+              background-size:46px 46px;
+              -webkit-mask-image:radial-gradient(circle at 50% 42%, #000 28%, transparent 76%);
+              mask-image:radial-gradient(circle at 50% 42%, #000 28%, transparent 76%)}
+            .card{position:relative;z-index:2;width:min(88vw,400px);padding:32px 26px 26px;
+              border:1px solid rgba(0,243,255,.34);border-radius:14px;
+              background:rgba(4,14,20,.74);
+              box-shadow:0 0 46px rgba(0,243,255,.13), inset 0 0 34px rgba(0,243,255,.05);
+              -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);text-align:center}
+            .brand{font-size:12px;letter-spacing:.42em;color:#00f3ff;opacity:.85}
+            h1{margin:14px 0 14px;font-size:25px;letter-spacing:.14em;font-weight:700}
+            .credit{margin:0;font-size:16px;color:#d6f2ff;letter-spacing:.04em}
+            .credit b{color:#ffd76a;font-weight:700}
+            .sub{margin:20px 0 10px;font-size:12px;color:#7fb6c9;letter-spacing:.16em}
+            input{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:10px;
+              border:1px solid rgba(0,243,255,.34);background:rgba(0,20,28,.92);color:#e8f7ff;
+              font-size:16px;text-align:center;letter-spacing:.2em;outline:none;transition:.18s}
+            input::placeholder{color:#4d7787;letter-spacing:.1em}
+            input:focus{border-color:#00f3ff;box-shadow:0 0 0 3px rgba(0,243,255,.12)}
+            button{margin-top:14px;width:100%;padding:12px;border-radius:10px;border:0;
+              background:linear-gradient(90deg,#00f3ff,#00a7b5);color:#04141a;
+              font-family:inherit;font-weight:700;font-size:15px;letter-spacing:.24em;
+              cursor:pointer;transition:.18s}
+            button:hover:not(:disabled){filter:brightness(1.08)}
+            button:disabled{opacity:.55;cursor:default}
+            .msg{margin-top:12px;min-height:20px;font-size:13px;letter-spacing:.04em}
+            .foot{position:fixed;left:0;right:0;bottom:16px;text-align:center;z-index:2;
+              font-size:11px;color:#3f6674;letter-spacing:.14em}
+            @media (max-height:520px){.card{padding:22px 20px}.sub{margin:12px 0 8px}}
+          </style>
+          </head>
+          <body>
+            <div class="bg"></div>
+            <div class="grid"></div>
+
+            <form class="card" id="gate" autocomplete="off">
+              <div class="brand">H O L O T R E E</div>
+              <h1>访问验证</h1>
+              <p class="credit">本项目由 <b>闫佳雯</b> 原创</p>
+              <p class="sub">请输入访问密码</p>
+              <input id="pwd" type="password" placeholder="请输入密码" autocomplete="off"
+                     autocapitalize="off" spellcheck="false" autofocus>
+              <button id="go" type="submit">进 入</button>
+              <div class="msg" id="msg"></div>
+            </form>
+
+            <div class="foot">HOLOGRAM CHRISTMAS TREE · 2025</div>
+
+          <script>
+          (function () {
+            var KEY = "holotree-ok";
+            var PASS = "\\u5fa1\\u5b50\\u8d1d"; /* 御子贝 */
+            var form = document.getElementById("gate");
+            var input = document.getElementById("pwd");
+            var btn = document.getElementById("go");
+            var msg = document.getElementById("msg");
+
+            try {
+              if (sessionStorage.getItem(KEY) === "1") { location.replace("./app.html"); return; }
+            } catch (e) {}
+
+            function fail(text) {
+              msg.style.color = "#ff5d8f";
+              msg.textContent = text;
+              input.value = "";
+              input.focus();
+            }
+
+            form.addEventListener("submit", function (ev) {
+              ev.preventDefault();
+              var v = (input.value || "").trim();
+              if (!v) { fail("请输入密码"); return; }
+              if (v === PASS) {
+                btn.disabled = true;
+                msg.style.color = "#6df7c1";
+                msg.textContent = "验证通过，正在进入…";
+                try { sessionStorage.setItem(KEY, "1"); } catch (e) {}
+                setTimeout(function () { location.replace("./app.html"); }, 380);
+              } else {
+                fail("密码不正确，请重试");
+              }
+            });
+          })();
+          </script>
+          </body>
+          </html>
+          `;
+
+          fs.writeFileSync(indexPath, gate, "utf8");
+
+          console.log(`[add-gate] 入口页已生成: ${indexPath}`);
+          console.log(`[add-gate] 应用页已生成: ${appPath}`);
+
+          EOF
+          node /tmp/add-gate.mjs app/dist
+          ls -l app/dist
+          echo "--- gate head ---" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          head -12 app/dist/index.html >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:
           enablement: true
+
       - name: Force Pages to build from Actions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/pages" -f build_type=workflow || true
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: app/dist
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
